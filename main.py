@@ -1,52 +1,180 @@
+# main.py
+
 import cv2
-import pickle
 import face_recognition
+import numpy as np
+import queue
+import threading
 
-cap = cv2.VideoCapture(0)
-cap.set(3, 640)
-cap.set(4, 480)
-
-# load the encoding file
-try:
-    file = open('EncodeFile.p', 'rb')
-    encodeListKnownWithId = pickle.load(file)
-    encodeListKnown, peopleId = encodeListKnownWithId
-except Exception as e:
-    print(f"Error loading encodings: {e}")
-finally:
-    file.close()
+from identity_store import IdentityStore
+from in_memory_index import InMemoryIndex
+from unknown_tracker import UnknownTracker
+from registration_worker import RegistrationWorker, RegistrationJob, UpdateJob
+from quality import blur_score
 
 
-while True:
-    success, img = cap.read()
+T_KNOWN = 0.5
+BLUR_THRESHOLD = 100.0
+BLUR_MARGIN_UPGRADE = 50.0  # how much sharper than threshold to trigger upgrade
 
-    # resize the image to 1/4 size for faster processing
-    imgSmall = cv2.resize(img, (0, 0), None, 0.25, 0.25)
-    imgSmall = cv2.cvtColor(imgSmall, cv2.COLOR_BGR2RGB)
 
-    faceCurrentFrame = face_recognition.face_locations(imgSmall)
-    encodeCurrentFrame = face_recognition.face_encodings(imgSmall, faceCurrentFrame)
+def find_best_match(embedding: np.ndarray, known_embeddings: np.ndarray):
+    if known_embeddings.size == 0:
+        return None, None
+    diffs = known_embeddings - embedding.reshape(1, -1)
+    dists = np.linalg.norm(diffs, axis=1)
+    idx = int(np.argmin(dists))
+    return idx, float(dists[idx])
 
-    for encodeFace, faceLoc in zip(encodeCurrentFrame, faceCurrentFrame):
-        matches = face_recognition.compare_faces(encodeListKnown, encodeFace)
-        faceDis = face_recognition.face_distance(encodeListKnown, encodeFace)
 
-        matchIndex = None
-        if len(faceDis) > 0:
-            matchIndex = faceDis.argmin()
+def main():
+    store = IdentityStore(root_dir="identities")
+    index = InMemoryIndex(store)
 
-        if matchIndex is not None and matches[matchIndex]:
-            id = peopleId[matchIndex].upper()
-            y1, x2, y2, x1 = faceLoc
-            y1, x2, y2, x1 = y1 * 4, x2 * 4, y2 * 4, x1 * 4
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.rectangle(img, (x1, y2 - 35), (x2, y2), (0, 255, 0), cv2.FILLED)
-            cv2.putText(img, id, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+    job_queue: queue.Queue = queue.Queue(maxsize=512)
+    stop_event = threading.Event()
 
-    if not success:
-        break
+    worker = RegistrationWorker(
+        job_queue=job_queue,
+        store=store,
+        index=index,
+        t_known=T_KNOWN,
+        margin=0.05,
+        blur_threshold=BLUR_THRESHOLD,
+        max_images=3,
+        stop_event=stop_event,
+    )
+    worker.start()
 
-    cv2.imshow("Camara", img)
+    tracker = UnknownTracker(
+        iou_threshold=0.3,
+        min_frames=5,
+        max_inactive_frames=15,
+        max_images=3,
+        blur_threshold=BLUR_THRESHOLD,
+    )
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    frame_idx = 0
+
+    try:
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+
+            frame_idx += 1
+
+            img_small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            img_small_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
+
+            face_locations = face_recognition.face_locations(img_small_rgb)
+            face_encodings = face_recognition.face_encodings(img_small_rgb, face_locations)
+
+            ids, known_embs = index.get_snapshot()
+            unknown_faces = []
+
+            for (top, right, bottom, left), face_embedding in zip(face_locations, face_encodings):
+                emb = np.array(face_embedding, dtype="float32")
+
+                # upscale box
+                top *= 4
+                right *= 4
+                bottom *= 4
+                left *= 4
+
+                # crop
+                face_crop = frame[max(0, top):max(0, bottom), max(0, left):max(0, right)]
+                crop_blur = blur_score(face_crop) if face_crop.size > 0 else 0.0
+
+                label = "Unknown"
+                color = (0, 0, 255)
+
+                if known_embs.size > 0:
+                    idx_match, dist = find_best_match(emb, known_embs)
+                    if idx_match is not None and dist is not None and dist <= T_KNOWN:
+                        identity_id = ids[idx_match]
+                        label = identity_id
+                        color = (0, 255, 0)
+
+                        # upgrade path if this identity was low-quality
+                        meta = index.get_meta(identity_id)
+                        quality = meta.get("quality", {})
+                        if quality.get("needs_refresh", False):
+                            if crop_blur >= BLUR_THRESHOLD + BLUR_MARGIN_UPGRADE and face_crop.size > 0:
+                                sample = {
+                                    "image": face_crop,
+                                    "blur": crop_blur,
+                                    "area": (right - left) * (bottom - top),
+                                }
+                                job = UpdateJob(identity_id=identity_id, embedding=emb, sample=sample)
+                                try:
+                                    job_queue.put_nowait(job)
+                                except queue.Full:
+                                    pass
+                    else:
+                        # unknown
+                        if face_crop.size > 0:
+                            unknown_faces.append(
+                                {
+                                    "bbox": (left, top, right, bottom),
+                                    "embedding": emb,
+                                    "face_image_bgr": face_crop,
+                                    "blur": crop_blur,
+                                }
+                            )
+                else:
+                    # no known embeddings yet
+                    if face_crop.size > 0:
+                        unknown_faces.append(
+                            {
+                                "bbox": (left, top, right, bottom),
+                                "embedding": emb,
+                                "face_image_bgr": face_crop,
+                                "blur": crop_blur,
+                            }
+                        )
+
+                # draw
+                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+                cv2.putText(
+                    frame,
+                    label,
+                    (left + 6, bottom - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                )
+
+            # handle unknowns
+            if unknown_faces:
+                candidates = tracker.update(frame_idx, unknown_faces)
+                for cand in candidates:
+                    job = RegistrationJob(candidate=cand)
+                    try:
+                        job_queue.put_nowait(job)
+                    except queue.Full:
+                        pass
+
+            cv2.imshow("Camera", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        stop_event.set()
+        try:
+            job_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        worker.join(timeout=2)
+
+
+if __name__ == "__main__":
+    main()
