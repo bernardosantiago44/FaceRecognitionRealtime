@@ -5,6 +5,7 @@ import cv2
 import face_recognition
 import numpy as np
 from identity_store import IdentityStore
+from ResourcePath import resource_path
 
 
 FOLDER_PATH = "Images"
@@ -27,7 +28,7 @@ def encode_image(img_bgr):
 def main():
     store = IdentityStore(root_dir="identities")
 
-    path_list = os.listdir(FOLDER_PATH)
+    path_list = os.listdir(resource_path(FOLDER_PATH))
 
     print("Bootstrapping identities from Images/")
 
@@ -36,7 +37,7 @@ def main():
         if filename.startswith("."):
             continue
 
-        img_path = os.path.join(FOLDER_PATH, filename)
+        img_path = resource_path(os.path.join(FOLDER_PATH, filename))
         img = cv2.imread(img_path)
         if img is None:
             print(f"Skipping unreadable file: {img_path}")
@@ -49,11 +50,21 @@ def main():
 
         # Use filename (without extension) as initial human label
         label = os.path.splitext(filename)[0]
-        identity_id = store.create_identity(
+        
+        # Create sample dict for the image
+        sample = {
+            "image": img,
+            "blur": 200.0,  # Assume bootstrap images are good quality
+            "area": img.shape[0] * img.shape[1]
+        }
+        
+        identity_id = store.create_identity_from_samples(
             embedding=embedding,
-            face_image_bgr=img,
+            samples=[sample],
             source="bootstrap",
             label=label,
+            extra_meta=None,
+            max_images=3,
         )
 
         print(f"Created identity {identity_id} from {filename}")

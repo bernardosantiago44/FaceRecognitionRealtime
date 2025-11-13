@@ -16,6 +16,7 @@ from quality import blur_score
 T_KNOWN = 0.5
 BLUR_THRESHOLD = 100.0
 BLUR_MARGIN_UPGRADE = 50.0  # how much sharper than threshold to trigger upgrade
+SCALE = 0.5
 
 
 def find_best_match(embedding: np.ndarray, known_embeddings: np.ndarray):
@@ -68,10 +69,14 @@ def main():
 
             frame_idx += 1
 
-            img_small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            img_small = cv2.resize(frame, (0, 0), fx=SCALE, fy=SCALE)
             img_small_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
 
-            face_locations = face_recognition.face_locations(img_small_rgb)
+            face_locations = face_recognition.face_locations(
+                img_small_rgb,
+                number_of_times_to_upsample=1,
+                model="hog"
+            )
             face_encodings = face_recognition.face_encodings(img_small_rgb, face_locations)
 
             ids, known_embs = index.get_snapshot()
@@ -81,10 +86,11 @@ def main():
                 emb = np.array(face_embedding, dtype="float32")
 
                 # upscale box
-                top *= 4
-                right *= 4
-                bottom *= 4
-                left *= 4
+                scale = 1 / SCALE
+                top = int(top * scale)
+                right = int(right * scale)
+                bottom = int(bottom * scale)
+                left = int(left * scale)
 
                 # crop
                 face_crop = frame[max(0, top):max(0, bottom), max(0, left):max(0, right)]

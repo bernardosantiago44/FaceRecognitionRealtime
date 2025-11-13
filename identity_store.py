@@ -7,11 +7,12 @@ from typing import List, Tuple, Optional, Dict
 
 import cv2
 import numpy as np
+from ResourcePath import resource_path
 
 
 class IdentityStore:
     def __init__(self, root_dir: str = "identities"):
-        self.root_dir = root_dir
+        self.root_dir = resource_path(root_dir)
         os.makedirs(self.root_dir, exist_ok=True)
 
     # ---------- Read side ----------
@@ -27,11 +28,11 @@ class IdentityStore:
         meta_map: Dict[str, dict] = {}
 
         for ident in sorted(os.listdir(self.root_dir)):
-            ident_dir = os.path.join(self.root_dir, ident)
+            ident_dir = resource_path(os.path.join(self.root_dir, ident))
             if not os.path.isdir(ident_dir):
                 continue
 
-            emb_path = os.path.join(ident_dir, "embeddings.npz")
+            emb_path = resource_path(os.path.join(ident_dir, "embeddings.npz"))
             if not os.path.exists(emb_path):
                 continue
 
@@ -44,7 +45,7 @@ class IdentityStore:
             except Exception:
                 continue
 
-            meta_path = os.path.join(ident_dir, "meta.json")
+            meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
             meta = {}
             if os.path.exists(meta_path):
                 try:
@@ -64,8 +65,8 @@ class IdentityStore:
         return ids, embeddings, meta_map
 
     def load_meta(self, identity_id: str) -> Optional[dict]:
-        ident_dir = os.path.join(self.root_dir, identity_id)
-        meta_path = os.path.join(ident_dir, "meta.json")
+        ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
         if not os.path.exists(meta_path):
             return None
         try:
@@ -83,7 +84,7 @@ class IdentityStore:
         existing = [
             name
             for name in os.listdir(self.root_dir)
-            if os.path.isdir(os.path.join(self.root_dir, name))
+            if os.path.isdir(resource_path(os.path.join(self.root_dir, name)))
             and name.startswith("person_")
         ]
         max_num = 0
@@ -117,11 +118,11 @@ class IdentityStore:
             raise ValueError("embedding must be 1D")
 
         identity_id = self._generate_identity_id()
-        ident_dir = os.path.join(self.root_dir, identity_id)
+        ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
         os.makedirs(ident_dir, exist_ok=False)
 
         # Save embeddings: for now just the representative embedding
-        emb_path = os.path.join(ident_dir, "embeddings.npz")
+        emb_path = resource_path(os.path.join(ident_dir, "embeddings.npz"))
         np.savez_compressed(emb_path, embeddings=embedding.reshape(1, -1).astype("float32"))
 
         # Sort samples by blur desc, then area desc
@@ -132,12 +133,12 @@ class IdentityStore:
         blur_values = [s.get("blur", 0.0) for s in valid_samples]
 
         if valid_samples:
-            faces_dir = os.path.join(ident_dir, "faces")
+            faces_dir = resource_path(os.path.join(ident_dir, "faces"))
             os.makedirs(faces_dir, exist_ok=True)
             for i, s in enumerate(valid_samples[:max_images], start=1):
                 img = s["image"]
                 img_name = f"face_{i:03d}.jpg"
-                img_path = os.path.join(faces_dir, img_name)
+                img_path = resource_path(os.path.join(faces_dir, img_name))
                 cv2.imwrite(img_path, img)
                 num_images += 1
 
@@ -173,7 +174,7 @@ class IdentityStore:
         if extra_meta:
             meta.update({k: v for k, v in extra_meta.items() if k not in meta})
 
-        meta_path = os.path.join(ident_dir, "meta.json")
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
@@ -191,9 +192,9 @@ class IdentityStore:
         Append new embedding and possibly replace one of the stored images with a better one.
         Returns updated meta dict or None on failure.
         """
-        ident_dir = os.path.join(self.root_dir, identity_id)
-        emb_path = os.path.join(ident_dir, "embeddings.npz")
-        meta_path = os.path.join(ident_dir, "meta.json")
+        ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
+        emb_path = resource_path(os.path.join(ident_dir, "embeddings.npz"))
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
 
         if not os.path.exists(ident_dir) or not os.path.exists(emb_path):
             return None
@@ -221,7 +222,7 @@ class IdentityStore:
             else:
                 meta = {}
 
-            faces_dir = os.path.join(ident_dir, "faces")
+            faces_dir = resource_path(os.path.join(ident_dir, "faces"))
             os.makedirs(faces_dir, exist_ok=True)
 
             # Load existing images blur stats from meta if present
@@ -243,7 +244,7 @@ class IdentityStore:
                 else:
                     # Overwrite first for simplicity
                     img_name = existing[0]
-                cv2.imwrite(os.path.join(faces_dir, img_name), img)
+                cv2.imwrite(resource_path(os.path.join(faces_dir, img_name)), img)
 
             # Recompute quality fields
             # For simplicity: update using max(old, new)

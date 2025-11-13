@@ -9,6 +9,7 @@ import numpy as np
 from identity_store import IdentityStore
 from in_memory_index import InMemoryIndex
 from unknown_tracker import RegistrationCandidate
+from ResourcePath import resource_path
 
 
 class RegistrationJob:
@@ -105,8 +106,8 @@ class RegistrationWorker(threading.Thread):
             return
 
         # Recompute representative embedding (mean) for index
-        ident_dir = f"{self._store.root_dir}/{job.identity_id}"
-        emb_path = f"{ident_dir}/embeddings.npz"
+        ident_dir = resource_path(f"{self._store.root_dir}/{job.identity_id}")
+        emb_path = resource_path(f"{ident_dir}/embeddings.npz")
         try:
             data = np.load(emb_path)
             embs = data.get("embeddings")
