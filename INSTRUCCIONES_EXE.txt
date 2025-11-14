@@ -1,0 +1,45 @@
+INSTRUCCIONES PARA USAR EL EJECUTABLE
+=====================================
+
+El ejecutable se encuentra en la carpeta: dist\FaceRecognitionApp.exe
+
+REQUISITOS:
+-----------
+- Windows 10 o superior
+- Cámara web conectada
+- El ejecutable NO requiere Python instalado (todo está incluido)
+
+USO:
+----
+1. Ejecuta FaceRecognitionApp.exe haciendo doble clic
+2. La aplicación abrirá una ventana mostrando el video de tu cámara
+3. Las caras desconocidas aparecerán con un rectángulo rojo y la etiqueta "Unknown"
+4. Después de detectar una cara desconocida durante varios frames, se registrará automáticamente
+5. Las caras conocidas aparecerán con un rectángulo verde y mostrarán su ID (ej: person_000001)
+6. Presiona 'q' para salir
+
+CARPETAS GENERADAS:
+-------------------
+- identities/: Se creará automáticamente EN LA MISMA CARPETA donde está el ejecutable
+  (por ejemplo: dist\identities\ si ejecutas desde dist\)
+  - Cada identidad tiene su propia carpeta (person_000001, person_000002, etc.)
+  - Cada carpeta contiene:
+    * embeddings.npz: Los vectores de características faciales
+    * meta.json: Metadatos de la identidad
+    * faces/: Imágenes de ejemplo de la cara
+  - IMPORTANTE: Las identidades se guardan junto al ejecutable, por lo que se
+    mantendrán entre ejecuciones y el reconocimiento funcionará correctamente
+
+NOTAS:
+------
+- El ejecutable es independiente y puede copiarse a otra computadora
+- La primera vez que se ejecuta puede tardar unos segundos en cargar
+- Si tienes problemas con la cámara, verifica que no esté siendo usada por otra aplicación
+- Los datos de identidades se guardan en la carpeta "identities" junto al ejecutable
+
+ARCHIVOS ADICIONALES:
+---------------------
+- FaceRecognitionApp.spec: Archivo de configuración de PyInstaller (para modificar el build)
+- Si necesitas reconstruir el ejecutable, ejecuta:
+  python -m PyInstaller FaceRecognitionApp.spec --clean
+
