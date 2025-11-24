@@ -1,6 +1,8 @@
 # main.py
 import cv2
 import face_recognition
+import json
+import os
 import queue
 import threading
 import time
@@ -10,10 +12,11 @@ from in_memory_index import InMemoryIndex
 from unknown_tracker import UnknownTracker
 from registration_worker import RegistrationWorker, RegistrationJob, UpdateJob
 from quality import blur_score
+from ResourcePath import resource_path
 
 # --- UI imports ---
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 from PIL import Image, ImageTk
 from CameraSelectionDialog import CameraSelectionDialog
 from queue import Empty
@@ -232,8 +235,6 @@ class FaceRecognitionApp:
 
     def _show_naming_dialog(self, track_id, identity_id, current_name):
         """Show a dialog to name/rename a face."""
-        from tkinter import simpledialog
-
         track = self.tracks.get(track_id)
         if track is None:
             return
@@ -258,10 +259,6 @@ class FaceRecognitionApp:
 
     def _update_person_name(self, identity_id, new_name):
         """Update the display name for a person in the store."""
-        import os
-        import json
-        from ResourcePath import resource_path
-
         ident_dir = resource_path(os.path.join(self.store.root_dir, identity_id))
         meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
 
@@ -279,7 +276,8 @@ class FaceRecognitionApp:
 
             # Update the in-memory index
             self.index.update_meta(identity_id, meta)
-        except Exception:
+        except (IOError, json.JSONDecodeError):
+            # Failed to read or parse the metadata file; skip persistence
             pass
 
     def change_camera(self):
@@ -388,7 +386,7 @@ class FaceRecognitionApp:
             is_hovered = self.label_mode and track_id == self.hovered_track_id
             thickness = 4 if is_hovered else 2
             if is_hovered:
-                color = (255, 255, 0)  # Cyan highlight in BGR
+                color = (255, 255, 0)  # Yellow highlight in BGR
 
             cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
             cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
