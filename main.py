@@ -71,6 +71,10 @@ class FaceRecognitionApp:
         self.next_track_id = 0
         self.frame_idx = 0
 
+        # --- Label Mode state (session only) ---
+        self.label_mode = False
+        self.hovered_track_id = None
+
         # --- Camera setup ---
         self.camera_index = camera_index
         self.cap = None
@@ -88,7 +92,20 @@ class FaceRecognitionApp:
             text="Select Camera",
             command=self.change_camera
         )
-        self.select_cam_button.pack(side=tk.BOTTOM, pady=5)
+        self.select_cam_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Label Mode toggle button
+        self.label_mode_button = tk.Button(
+            self.bottom_frame,
+            text="Label Mode: Off",
+            command=self._toggle_label_mode,
+            relief=tk.RAISED,
+        )
+        self.label_mode_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Bind click and motion events for Label Mode
+        self.video_label.bind("<Button-1>", self._on_video_click)
+        self.video_label.bind("<Motion>", self._on_video_motion)
 
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -168,6 +185,102 @@ class FaceRecognitionApp:
 
     def _update_tracks(self, detections):
         self.next_track_id = update_tracks(self.tracks, detections, self.next_track_id)
+
+    def _toggle_label_mode(self):
+        """Toggle Label Mode on/off."""
+        self.label_mode = not self.label_mode
+        if self.label_mode:
+            self.label_mode_button.config(text="Label Mode: On", relief=tk.SUNKEN)
+        else:
+            self.label_mode_button.config(text="Label Mode: Off", relief=tk.RAISED)
+            self.hovered_track_id = None
+
+    def _find_track_at_position(self, x, y):
+        """Find the track ID at the given (x, y) position, or None if no face is there."""
+        for track_id, track in self.tracks.items():
+            top, right, bottom, left = track["bbox"]
+            if left <= x <= right and top <= y <= bottom:
+                return track_id
+        return None
+
+    def _on_video_click(self, event):
+        """Handle click on the video label."""
+        if not self.label_mode:
+            return
+
+        track_id = self._find_track_at_position(event.x, event.y)
+        if track_id is None:
+            return
+
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+
+        # Get the current label/name for the dialog
+        current_label = track.get("label")
+        current_name = track.get("display_name") or ""
+
+        self._show_naming_dialog(track_id, current_label, current_name)
+
+    def _on_video_motion(self, event):
+        """Handle mouse motion over the video label for hover highlighting."""
+        if not self.label_mode:
+            self.hovered_track_id = None
+            return
+
+        self.hovered_track_id = self._find_track_at_position(event.x, event.y)
+
+    def _show_naming_dialog(self, track_id, identity_id, current_name):
+        """Show a dialog to name/rename a face."""
+        from tkinter import simpledialog
+
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+
+        prompt = f"Enter name for {identity_id or 'this person'}:"
+        new_name = simpledialog.askstring(
+            "Name Person",
+            prompt,
+            initialvalue=current_name,
+            parent=self.root
+        )
+
+        if new_name is None:
+            return  # User cancelled
+
+        # Update the display name in the track
+        track["display_name"] = new_name if new_name.strip() else None
+
+        # Persist the name if we have a valid identity_id
+        if identity_id and identity_id not in (None, "Unknown"):
+            self._update_person_name(identity_id, new_name)
+
+    def _update_person_name(self, identity_id, new_name):
+        """Update the display name for a person in the store."""
+        import os
+        import json
+        from ResourcePath import resource_path
+
+        ident_dir = resource_path(os.path.join(self.store.root_dir, identity_id))
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
+
+        if not os.path.exists(meta_path):
+            return
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+
+            meta["display_name"] = new_name.strip() if new_name and new_name.strip() else None
+
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+            # Update the in-memory index
+            self.index.update_meta(identity_id, meta)
+        except Exception:
+            pass
 
     def change_camera(self):
         # Scan for available cameras
@@ -265,12 +378,19 @@ class FaceRecognitionApp:
                     }
                 )
 
-        for track in self.tracks.values():
+        for track_id, track in self.tracks.items():
             top, right, bottom, left = track["bbox"]
             base_label = track.get("label")
             display_label = track.get("display_name") or base_label or "loading..."
             color = (0, 255, 0) if base_label not in (None, "Unknown") else (0, 0, 255)
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+
+            # Hover highlight in Label Mode
+            is_hovered = self.label_mode and track_id == self.hovered_track_id
+            thickness = 4 if is_hovered else 2
+            if is_hovered:
+                color = (255, 255, 0)  # Cyan highlight in BGR
+
+            cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
             cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
             cv2.putText(
                 frame,
