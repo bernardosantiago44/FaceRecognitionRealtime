@@ -2,6 +2,7 @@
 import cv2
 import face_recognition
 import json
+import logging
 import os
 import queue
 import threading
@@ -13,6 +14,13 @@ from unknown_tracker import UnknownTracker
 from registration_worker import RegistrationWorker, RegistrationJob, UpdateJob
 from quality import blur_score
 from ResourcePath import resource_path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # --- UI imports ---
 import tkinter as tk
@@ -135,6 +143,7 @@ class FaceRecognitionApp:
                 track_id, label, is_known, embedding = results_q.get_nowait()
                 track = self.tracks.get(track_id)
                 if track is None:
+                    logger.debug(f"Recognition result for unknown track {track_id}, skipping")
                     continue
 
                 pending = track.pop("pending", None)
@@ -173,6 +182,7 @@ class FaceRecognitionApp:
                                 pass
                 else:
                     if face_crop is not None and face_crop.size > 0 and embedding is not None:
+                        logger.debug(f"Unknown face detected for track {track_id}, adding to unknown_faces")
                         unknown_faces.append(
                             {
                                 "bbox": (left, top, right, bottom),
@@ -432,13 +442,15 @@ class FaceRecognitionApp:
 
         # handle unknowns
         if unknown_faces:
+            logger.debug(f"Processing {len(unknown_faces)} unknown face(s) at frame {self.frame_idx}")
             candidates = self.tracker.update(self.frame_idx, unknown_faces)
             for cand in candidates:
+                logger.info(f"Submitting registration job for candidate (track_id={cand.meta.get('track_id')})")
                 job = RegistrationJob(candidate=cand)
                 try:
                     self.job_queue.put_nowait(job)
                 except queue.Full:
-                    pass
+                    logger.warning("Registration job queue full, registration job dropped")
 
         # --- Convert frame to Tkinter-compatible image and show it ---
         # OpenCV is BGR; convert to RGB

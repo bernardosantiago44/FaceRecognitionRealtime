@@ -1,5 +1,6 @@
 # registration_worker.py
 
+import logging
 import threading
 import queue
 from typing import Optional
@@ -10,6 +11,8 @@ from identity_store import IdentityStore
 from in_memory_index import InMemoryIndex
 from unknown_tracker import RegistrationCandidate
 from ResourcePath import resource_path
+
+logger = logging.getLogger(__name__)
 
 
 class RegistrationJob:
@@ -77,9 +80,11 @@ class RegistrationWorker(threading.Thread):
             idx = int(np.argmin(dists))
             d_min = float(dists[idx])
             if d_min <= self._t_known + self._margin:
+                logger.info(f"Registration skipped: candidate too close to {ids[idx]} (dist={d_min:.3f}, threshold={self._t_known + self._margin:.3f})")
                 return
 
         extra_meta = dict(cand.meta)
+        logger.info(f"Creating new identity from candidate (track_id={cand.meta.get('track_id')}, num_samples={len(cand.samples)})")
         identity_id = self._store.create_identity_from_samples(
             embedding=emb,
             samples=cand.samples,
@@ -92,6 +97,7 @@ class RegistrationWorker(threading.Thread):
         # Load back meta to keep index consistent
         meta = self._store.load_meta(identity_id) or {}
         self._index.add_identity(identity_id, emb, meta)
+        logger.info(f"New identity registered: {identity_id}")
 
     def _handle_update(self, job: UpdateJob):
         # Upgrade blurry identity when sharper sample arrives

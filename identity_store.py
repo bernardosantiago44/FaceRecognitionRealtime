@@ -1,5 +1,6 @@
 # identity_store.py
 
+import logging
 import os
 import json
 from datetime import datetime
@@ -8,6 +9,8 @@ from typing import List, Tuple, Optional, Dict
 import cv2
 import numpy as np
 from ResourcePath import resource_path
+
+logger = logging.getLogger(__name__)
 
 
 class IdentityStore:
@@ -147,6 +150,7 @@ class IdentityStore:
 
         identity_id = self._generate_identity_id()
         ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
+        logger.info(f"Creating new identity: {identity_id}")
         os.makedirs(ident_dir, exist_ok=False)
 
         # Save embeddings: for now just the representative embedding
@@ -207,6 +211,7 @@ class IdentityStore:
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
+        logger.info(f"Identity {identity_id} created with {num_images} images")
         return identity_id
 
     def update_identity_with_sample(

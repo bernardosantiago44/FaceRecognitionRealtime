@@ -3,11 +3,14 @@
 
 import cv2
 import face_recognition
+import logging
 import numpy as np
 from queue import Queue, Empty
 from threading import Thread
 
 from config import T_KNOWN
+
+logger = logging.getLogger(__name__)
 
 recognition_q = Queue(maxsize=1)
 results_q = Queue()
@@ -61,6 +64,11 @@ def recognition_worker():
                         if idx_match is not None and dist is not None and dist <= T_KNOWN:
                             label = ids[idx_match]
                             is_known = True
+                            logger.debug(f"Track {track_id}: matched to {label} (dist={dist:.3f})")
+                        else:
+                            logger.debug(f"Track {track_id}: unknown face (min_dist={dist:.3f if dist else 'N/A'})")
+                    else:
+                        logger.debug(f"Track {track_id}: unknown face (no known embeddings)")
 
             results_q.put((track_id, label, is_known, embedding))
 
