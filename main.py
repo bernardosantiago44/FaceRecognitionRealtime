@@ -1,7 +1,6 @@
 # main.py
 import cv2
 import face_recognition
-import numpy as np
 import queue
 import threading
 import time
@@ -12,111 +11,28 @@ from unknown_tracker import UnknownTracker
 from registration_worker import RegistrationWorker, RegistrationJob, UpdateJob
 from quality import blur_score
 
-# --- NEW: UI imports ---
+# --- UI imports ---
 import tkinter as tk
-from tkinter import simpledialog, messagebox
+from tkinter import messagebox
 from PIL import Image, ImageTk
 from CameraSelectionDialog import CameraSelectionDialog
-from threading import Thread
-from queue import Queue, Empty
+from queue import Empty
 
-T_KNOWN = 0.5
-BLUR_THRESHOLD = 100.0
-BLUR_MARGIN_UPGRADE = 50.0  # how much sharper than threshold to trigger upgrade
-DETECT_SCALE = 0.5
-DETECT_EVERY_K = 5
-TRACK_IOU_THRESHOLD = 0.3
-MAX_TRACK_MISSED = 10
-RECOG_COOLDOWN = 1.5  # seconds
+# --- Modular imports ---
+from config import (
+    T_KNOWN,
+    BLUR_THRESHOLD,
+    BLUR_MARGIN_UPGRADE,
+    DETECT_SCALE,
+    DETECT_EVERY_K,
+    RECOG_COOLDOWN,
+)
+from camera_utils import list_available_cameras
+from recognition import results_q, submit_recognition, start_recognition_worker
+from track_manager import update_tracks
 
-recognition_q = Queue(maxsize=1)
-results_q = Queue()
-
-def find_best_match(embedding: np.ndarray, known_embeddings: np.ndarray):
-    if known_embeddings.size == 0:
-        return None, None
-    diffs = known_embeddings - embedding.reshape(1, -1)
-    dists = np.linalg.norm(diffs, axis=1)
-    idx = int(np.argmin(dists))
-    return idx, float(dists[idx])
-
-
-def compute_iou(box_a, box_b):
-    top_a, right_a, bottom_a, left_a = box_a
-    top_b, right_b, bottom_b, left_b = box_b
-
-    inter_left = max(left_a, left_b)
-    inter_top = max(top_a, top_b)
-    inter_right = min(right_a, right_b)
-    inter_bottom = min(bottom_a, bottom_b)
-
-    if inter_right <= inter_left or inter_bottom <= inter_top:
-        return 0.0
-
-    inter_area = (inter_right - inter_left) * (inter_bottom - inter_top)
-    area_a = (right_a - left_a) * (bottom_a - top_a)
-    area_b = (right_b - left_b) * (bottom_b - top_b)
-    denom = area_a + area_b - inter_area
-    if denom <= 0:
-        return 0.0
-    return inter_area / denom
-
-
-def submit_recognition(payload):
-    if recognition_q.full():
-        try:
-            recognition_q.get_nowait()
-        except Empty:
-            pass
-    try:
-        recognition_q.put_nowait(payload)
-    except Empty:
-        pass
-
-
-def recognition_worker():
-    while True:
-        payload = recognition_q.get()
-        tracks_payload = payload.get("tracks", [])
-        ids = payload.get("ids", [])
-        known_embs = payload.get("known_embs", np.array([]))
-
-        for track_payload in tracks_payload:
-            track_id = track_payload["track_id"]
-            face_crop = track_payload["face_crop"]
-            embedding = None
-            label = "Unknown"
-            is_known = False
-
-            if face_crop.size > 0:
-                crop_rgb = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-                encodings = face_recognition.face_encodings(crop_rgb)
-                if encodings:
-                    embedding = np.array(encodings[0], dtype="float32")
-                    if known_embs.size > 0:
-                        idx_match, dist = find_best_match(embedding, known_embs)
-                        if idx_match is not None and dist is not None and dist <= T_KNOWN:
-                            label = ids[idx_match]
-                            is_known = True
-
-            results_q.put((track_id, label, is_known, embedding))
-
-
-Thread(target=recognition_worker, daemon=True).start()
-
-def list_available_cameras(max_index: int = 5):
-    """Return a list of camera indices that can be opened."""
-    available = []
-    for idx in range(max_index + 1):
-        cap = cv2.VideoCapture(idx)
-        ok = cap.isOpened()
-        if not ok:
-            cap.release()
-            continue
-        cap.release()
-        if ok:
-            available.append(idx)
-    return available
+# Start the recognition worker thread
+start_recognition_worker()
 
 
 class FaceRecognitionApp:
@@ -251,54 +167,7 @@ class FaceRecognitionApp:
         return unknown_faces
 
     def _update_tracks(self, detections):
-        unmatched_tracks = set(self.tracks.keys())
-        unmatched_detections = set(range(len(detections)))
-        matches = []
-
-        while unmatched_tracks and unmatched_detections:
-            best_pair = None
-            best_iou = 0.0
-            for track_id in unmatched_tracks:
-                track_box = self.tracks[track_id]["bbox"]
-                for det_idx in unmatched_detections:
-                    iou = compute_iou(track_box, detections[det_idx])
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_pair = (track_id, det_idx)
-
-            if best_pair is None or best_iou < TRACK_IOU_THRESHOLD:
-                break
-
-            track_id, det_idx = best_pair
-            matches.append((track_id, det_idx))
-            unmatched_tracks.remove(track_id)
-            unmatched_detections.remove(det_idx)
-
-        for track_id, det_idx in matches:
-            track = self.tracks[track_id]
-            track["bbox"] = detections[det_idx]
-            track["missed"] = 0
-
-        for det_idx in unmatched_detections:
-            self.tracks[self.next_track_id] = {
-                "bbox": detections[det_idx],
-                "label": None,
-                "state": "loading",
-                "display_name": None,
-                "last_recog_time": 0.0,
-                "missed": 0,
-            }
-            self.next_track_id += 1
-
-        to_delete = []
-        for track_id in unmatched_tracks:
-            track = self.tracks[track_id]
-            track["missed"] += 1
-            if track["missed"] > MAX_TRACK_MISSED:
-                to_delete.append(track_id)
-
-        for track_id in to_delete:
-            del self.tracks[track_id]
+        self.next_track_id = update_tracks(self.tracks, detections, self.next_track_id)
 
     def change_camera(self):
         # Scan for available cameras
