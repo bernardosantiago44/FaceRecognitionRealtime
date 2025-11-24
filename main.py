@@ -37,6 +37,7 @@ from config import (
     DETECT_SCALE,
     DETECT_EVERY_K,
     RECOG_COOLDOWN,
+    UNKNOWN_EMBEDDING_THRESHOLD,
 )
 from camera_utils import list_available_cameras
 from recognition import results_q, submit_recognition, start_recognition_worker
@@ -76,6 +77,7 @@ class FaceRecognitionApp:
             max_inactive_frames=15,
             max_images=3,
             blur_threshold=BLUR_THRESHOLD,
+            embedding_threshold=UNKNOWN_EMBEDDING_THRESHOLD,
         )
 
         self.tracks = {}

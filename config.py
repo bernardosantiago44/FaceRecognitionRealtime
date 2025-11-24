@@ -14,5 +14,10 @@ DETECT_EVERY_K = 5
 TRACK_IOU_THRESHOLD = 0.3
 MAX_TRACK_MISSED = 10
 
+# Unknown tracker settings
+# Embedding threshold for matching unknown faces to tracks (slightly higher than T_KNOWN
+# to allow for more variance in unknown face tracking before registration)
+UNKNOWN_EMBEDDING_THRESHOLD = 0.6
+
 # Recognition cooldown (seconds)
 RECOG_COOLDOWN = 1.5

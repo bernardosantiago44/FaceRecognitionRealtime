@@ -15,6 +15,7 @@ class TestUnknownTracker(unittest.TestCase):
             max_inactive_frames=15,
             max_images=3,
             blur_threshold=100.0,
+            embedding_threshold=0.6,
         )
     
     def _create_fake_embedding(self, seed=0):

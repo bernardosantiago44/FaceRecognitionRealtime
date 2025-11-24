@@ -42,12 +42,14 @@ class UnknownTracker:
         max_inactive_frames: int = 15,
         max_images: int = 3,
         blur_threshold: float = 100.0,
+        embedding_threshold: float = 0.6,
     ):
         self.iou_threshold = iou_threshold
         self.min_frames = min_frames
         self.max_inactive_frames = max_inactive_frames
         self.max_images = max_images
         self.blur_threshold = blur_threshold
+        self.embedding_threshold = embedding_threshold
 
         self._tracks: Dict[int, Track] = {}
         self._next_track_id: int = 1
@@ -180,7 +182,6 @@ class UnknownTracker:
             # This handles cases where the face moves significantly between frames
             if best_track_id is None and emb is not None:
                 best_emb_dist = float("inf")
-                emb_threshold = 0.6  # Embedding distance threshold for same person
                 for track_id, track in self._tracks.items():
                     if not track.active:
                         continue
@@ -189,7 +190,7 @@ class UnknownTracker:
                     # Compare with mean embedding of the track
                     track_mean_emb = np.mean(track.embeddings, axis=0)
                     dist = float(np.linalg.norm(emb - track_mean_emb))
-                    if dist < best_emb_dist and dist < emb_threshold:
+                    if dist < best_emb_dist and dist < self.embedding_threshold:
                         best_emb_dist = dist
                         best_track_id = track_id
                 if best_track_id is not None:
