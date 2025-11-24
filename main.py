@@ -275,10 +275,11 @@ class FaceRecognitionApp:
             return  # User cancelled
 
         # Update the display name in the track
-        track["display_name"] = new_name if new_name.strip() else None
+        stripped_name = new_name.strip() if new_name else None
+        track["display_name"] = stripped_name if stripped_name else None
 
         # Persist the name if we have a valid identity_id
-        if identity_id and identity_id not in (None, "Unknown"):
+        if identity_id and identity_id != "Unknown":
             self._update_person_name(identity_id, new_name)
 
     def _update_person_name(self, identity_id, new_name):
