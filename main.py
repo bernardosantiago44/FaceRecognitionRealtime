@@ -199,10 +199,34 @@ class FaceRecognitionApp:
             self.hovered_track_id = None
 
     def _find_track_at_position(self, x, y):
-        """Find the track ID at the given (x, y) position, or None if no face is there."""
+        """Find the track ID at the given (x, y) position, or None if no face is there.
+        
+        Coordinates are adjusted for potential offset when the label is larger than the image.
+        """
+        # Get the current image dimensions from the label
+        if not hasattr(self.video_label, 'imgtk') or self.video_label.imgtk is None:
+            return None
+        
+        img_width = self.video_label.imgtk.width()
+        img_height = self.video_label.imgtk.height()
+        label_width = self.video_label.winfo_width()
+        label_height = self.video_label.winfo_height()
+        
+        # Calculate offset (image is centered in label)
+        offset_x = max(0, (label_width - img_width) // 2)
+        offset_y = max(0, (label_height - img_height) // 2)
+        
+        # Adjust click coordinates to image space
+        img_x = x - offset_x
+        img_y = y - offset_y
+        
+        # Check if click is within image bounds
+        if img_x < 0 or img_x >= img_width or img_y < 0 or img_y >= img_height:
+            return None
+        
         for track_id, track in self.tracks.items():
             top, right, bottom, left = track["bbox"]
-            if left <= x <= right and top <= y <= bottom:
+            if left <= img_x <= right and top <= img_y <= bottom:
                 return track_id
         return None
 
@@ -269,7 +293,8 @@ class FaceRecognitionApp:
             with open(meta_path, "r") as f:
                 meta = json.load(f)
 
-            meta["display_name"] = new_name.strip() if new_name and new_name.strip() else None
+            stripped_name = new_name.strip() if new_name else None
+            meta["display_name"] = stripped_name if stripped_name else None
 
             with open(meta_path, "w") as f:
                 json.dump(meta, f, indent=2)
@@ -382,11 +407,13 @@ class FaceRecognitionApp:
             display_label = track.get("display_name") or base_label or "loading..."
             color = (0, 255, 0) if base_label not in (None, "Unknown") else (0, 0, 255)
 
-            # Hover highlight in Label Mode
+            # Hover highlight in Label Mode - use thicker border and outer glow effect
             is_hovered = self.label_mode and track_id == self.hovered_track_id
-            thickness = 4 if is_hovered else 2
+            thickness = 2
             if is_hovered:
-                color = (255, 255, 0)  # Yellow highlight in BGR
+                # Draw outer highlight border first (yellow glow)
+                cv2.rectangle(frame, (left - 3, top - 3), (right + 3, bottom + 3), (0, 255, 255), 2)
+                thickness = 3
 
             cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
             cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
