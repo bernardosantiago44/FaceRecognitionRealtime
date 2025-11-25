@@ -1,5 +1,6 @@
 # identity_store.py
 
+import logging
 import os
 import json
 from datetime import datetime
@@ -9,11 +10,32 @@ import cv2
 import numpy as np
 from ResourcePath import resource_path
 
+logger = logging.getLogger(__name__)
+
 
 class IdentityStore:
     def __init__(self, root_dir: str = "identities"):
         self.root_dir = resource_path(root_dir)
         os.makedirs(self.root_dir, exist_ok=True)
+        self._ensure_display_name_field()
+
+    def _ensure_display_name_field(self):
+        for ident in os.listdir(self.root_dir):
+            ident_dir = resource_path(os.path.join(self.root_dir, ident))
+            if not os.path.isdir(ident_dir):
+                continue
+            meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
+            if not os.path.exists(meta_path):
+                continue
+            try:
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                if "display_name" not in meta:
+                    meta["display_name"] = None
+                    with open(meta_path, "w") as f:
+                        json.dump(meta, f, indent=2)
+            except Exception:
+                continue
 
     # ---------- Read side ----------
 
@@ -51,6 +73,10 @@ class IdentityStore:
                 try:
                     with open(meta_path, "r") as f:
                         meta = json.load(f)
+                    if "display_name" not in meta:
+                        meta["display_name"] = None
+                        with open(meta_path, "w") as f:
+                            json.dump(meta, f, indent=2)
                 except Exception:
                     meta = {}
 
@@ -71,7 +97,12 @@ class IdentityStore:
             return None
         try:
             with open(meta_path, "r") as f:
-                return json.load(f)
+                meta = json.load(f)
+            if "display_name" not in meta:
+                meta["display_name"] = None
+                with open(meta_path, "w") as f:
+                    json.dump(meta, f, indent=2)
+            return meta
         except Exception:
             return None
 
@@ -119,6 +150,7 @@ class IdentityStore:
 
         identity_id = self._generate_identity_id()
         ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
+        logger.info(f"Creating new identity: {identity_id}")
         os.makedirs(ident_dir, exist_ok=False)
 
         # Save embeddings: for now just the representative embedding
@@ -166,6 +198,7 @@ class IdentityStore:
             "created_at": now,
             "last_updated_at": now,
             "label": label,
+            "display_name": extra_meta.get("display_name") if extra_meta else None,
             "source": source,
             "num_embeddings": 1,
             "num_images": num_images,
@@ -178,6 +211,7 @@ class IdentityStore:
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
+        logger.info(f"Identity {identity_id} created with {num_images} images")
         return identity_id
 
     def update_identity_with_sample(
@@ -219,6 +253,8 @@ class IdentityStore:
             if os.path.exists(meta_path):
                 with open(meta_path, "r") as f:
                     meta = json.load(f)
+                if "display_name" not in meta:
+                    meta["display_name"] = None
             else:
                 meta = {}
 

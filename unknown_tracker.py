@@ -1,8 +1,11 @@
 # unknown_tracker.py
 
+import logging
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,12 +42,14 @@ class UnknownTracker:
         max_inactive_frames: int = 15,
         max_images: int = 3,
         blur_threshold: float = 100.0,
+        embedding_threshold: float = 0.6,
     ):
         self.iou_threshold = iou_threshold
         self.min_frames = min_frames
         self.max_inactive_frames = max_inactive_frames
         self.max_images = max_images
         self.blur_threshold = blur_threshold
+        self.embedding_threshold = embedding_threshold
 
         self._tracks: Dict[int, Track] = {}
         self._next_track_id: int = 1
@@ -95,6 +100,7 @@ class UnknownTracker:
             emitted=False,
         )
         self._tracks[t.track_id] = t
+        logger.debug(f"UnknownTracker: created track {t.track_id} at frame {frame_idx}")
         self._next_track_id += 1
 
     def _build_candidate(self, track: Track) -> Optional[RegistrationCandidate]:
@@ -103,6 +109,7 @@ class UnknownTracker:
 
         life = track.last_frame - track.first_frame + 1
         if life < self.min_frames or len(track.embeddings) < self.min_frames:
+            logger.debug(f"UnknownTracker: track {track.track_id} not ready (life={life}, embeddings={len(track.embeddings)}, min_frames={self.min_frames})")
             return None
 
         mean_emb = np.mean(track.embeddings, axis=0).astype("float32")
@@ -133,6 +140,7 @@ class UnknownTracker:
 
         track.emitted = True
 
+        logger.info(f"UnknownTracker: built registration candidate from track {track.track_id} (embeddings={len(track.embeddings)}, samples={len(selected)})")
         return RegistrationCandidate(
             embedding=mean_emb,
             samples=selected,
@@ -161,6 +169,7 @@ class UnknownTracker:
             best_track_id = None
             best_iou = 0.0
 
+            # First try IoU-based matching
             for track_id, track in self._tracks.items():
                 if not track.active:
                     continue
@@ -169,6 +178,24 @@ class UnknownTracker:
                     best_iou = iou
                     best_track_id = track_id
 
+            # If IoU matching failed, try embedding-based matching as fallback
+            # This handles cases where the face moves significantly between frames
+            if best_track_id is None and emb is not None:
+                best_emb_dist = float("inf")
+                for track_id, track in self._tracks.items():
+                    if not track.active:
+                        continue
+                    if not track.embeddings:
+                        continue
+                    # Compare with mean embedding of the track
+                    track_mean_emb = np.mean(track.embeddings, axis=0)
+                    dist = float(np.linalg.norm(emb - track_mean_emb))
+                    if dist < best_emb_dist and dist < self.embedding_threshold:
+                        best_emb_dist = dist
+                        best_track_id = track_id
+                if best_track_id is not None:
+                    logger.debug(f"UnknownTracker: embedding fallback matched face to track {best_track_id} (dist={best_emb_dist:.3f})")
+
             if best_track_id is not None:
                 track = self._tracks[best_track_id]
                 track.last_bbox = bbox
@@ -176,12 +203,14 @@ class UnknownTracker:
                 area = self._bbox_area(bbox)
                 track.samples.append(TrackSample(img, blur, area))
                 track.last_frame = frame_idx
+                logger.debug(f"UnknownTracker: updated track {best_track_id} at frame {frame_idx} (embeddings={len(track.embeddings)})")
             else:
                 self._create_track(frame_idx, bbox, emb, img, blur)
 
         # Deactivate stale
         for track in self._tracks.values():
             if track.active and frame_idx - track.last_frame > self.max_inactive_frames:
+                logger.debug(f"UnknownTracker: deactivating stale track {track.track_id} (last_frame={track.last_frame}, current={frame_idx})")
                 track.active = False
 
         candidates: List[RegistrationCandidate] = []

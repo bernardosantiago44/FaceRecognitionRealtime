@@ -1,49 +1,50 @@
 # main.py
 import cv2
 import face_recognition
-import numpy as np
+import json
+import logging
+import os
 import queue
 import threading
+import time
 
 from identity_store import IdentityStore
 from in_memory_index import InMemoryIndex
 from unknown_tracker import UnknownTracker
 from registration_worker import RegistrationWorker, RegistrationJob, UpdateJob
 from quality import blur_score
+from ResourcePath import resource_path
 
-# --- NEW: UI imports ---
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# --- UI imports ---
 import tkinter as tk
-from tkinter import simpledialog, messagebox
+from tkinter import messagebox, simpledialog
 from PIL import Image, ImageTk
 from CameraSelectionDialog import CameraSelectionDialog
+from queue import Empty
 
-T_KNOWN = 0.5
-BLUR_THRESHOLD = 100.0
-BLUR_MARGIN_UPGRADE = 50.0  # how much sharper than threshold to trigger upgrade
-SCALE = 0.5
+# --- Modular imports ---
+from config import (
+    T_KNOWN,
+    BLUR_THRESHOLD,
+    BLUR_MARGIN_UPGRADE,
+    DETECT_SCALE,
+    DETECT_EVERY_K,
+    RECOG_COOLDOWN,
+    UNKNOWN_EMBEDDING_THRESHOLD,
+)
+from camera_utils import list_available_cameras
+from recognition import results_q, submit_recognition, start_recognition_worker
+from track_manager import update_tracks
 
-
-def find_best_match(embedding: np.ndarray, known_embeddings: np.ndarray):
-    if known_embeddings.size == 0:
-        return None, None
-    diffs = known_embeddings - embedding.reshape(1, -1)
-    dists = np.linalg.norm(diffs, axis=1)
-    idx = int(np.argmin(dists))
-    return idx, float(dists[idx])
-
-def list_available_cameras(max_index: int = 5):
-    """Return a list of camera indices that can be opened."""
-    available = []
-    for idx in range(max_index + 1):
-        cap = cv2.VideoCapture(idx)
-        ok = cap.isOpened()
-        if not ok:
-            cap.release()
-            continue
-        cap.release()
-        if ok:
-            available.append(idx)
-    return available
+# Start the recognition worker thread
+start_recognition_worker()
 
 
 class FaceRecognitionApp:
@@ -76,9 +77,16 @@ class FaceRecognitionApp:
             max_inactive_frames=15,
             max_images=3,
             blur_threshold=BLUR_THRESHOLD,
+            embedding_threshold=UNKNOWN_EMBEDDING_THRESHOLD,
         )
 
+        self.tracks = {}
+        self.next_track_id = 0
         self.frame_idx = 0
+
+        # --- Label Mode state (session only) ---
+        self.label_mode = False
+        self.hovered_track_id = None
 
         # --- Camera setup ---
         self.camera_index = camera_index
@@ -97,7 +105,20 @@ class FaceRecognitionApp:
             text="Select Camera",
             command=self.change_camera
         )
-        self.select_cam_button.pack(side=tk.BOTTOM, pady=5)
+        self.select_cam_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Label Mode toggle button
+        self.label_mode_button = tk.Button(
+            self.bottom_frame,
+            text="Label Mode: Off",
+            command=self._toggle_label_mode,
+            relief=tk.RAISED,
+        )
+        self.label_mode_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Bind click and motion events for Label Mode
+        self.video_label.bind("<Button-1>", self._on_video_click)
+        self.video_label.bind("<Motion>", self._on_video_motion)
 
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -116,6 +137,186 @@ class FaceRecognitionApp:
         if not self.cap.isOpened():
             messagebox.showerror("Camera Error", f"Could not open camera index {index}.")
             self.cap = None
+
+    def _process_recognition_results(self, frame, frame_index):
+        unknown_faces = []
+        try:
+            while True:
+                track_id, label, is_known, embedding = results_q.get_nowait()
+                track = self.tracks.get(track_id)
+                if track is None:
+                    logger.debug(f"Recognition result for unknown track {track_id}, skipping")
+                    continue
+
+                pending = track.pop("pending", None)
+                bbox = pending.get("bbox") if pending else track["bbox"]
+                face_crop = pending.get("face_crop") if pending else None
+                crop_blur = pending.get("blur", 0.0) if pending else 0.0
+
+                if (face_crop is None or face_crop.size == 0) and bbox:
+                    top, right, bottom, left = bbox
+                    face_crop = frame[max(0, top):max(0, bottom), max(0, left):max(0, right)]
+                    crop_blur = blur_score(face_crop) if face_crop.size > 0 else 0.0
+                else:
+                    top, right, bottom, left = bbox
+
+                track["label"] = label
+                track["state"] = "known" if is_known else "unknown"
+
+                meta = {}
+                if is_known and label not in (None, "Unknown"):
+                    meta = self.index.get_meta(label)
+                track["display_name"] = meta.get("display_name") if meta else None
+
+                if is_known and embedding is not None:
+                    quality = meta.get("quality", {})
+                    if quality.get("needs_refresh", False):
+                        if crop_blur >= BLUR_THRESHOLD + BLUR_MARGIN_UPGRADE and face_crop is not None and face_crop.size > 0:
+                            sample = {
+                                "image": face_crop,
+                                "blur": crop_blur,
+                                "area": (right - left) * (bottom - top),
+                            }
+                            job = UpdateJob(identity_id=label, embedding=embedding, sample=sample)
+                            try:
+                                self.job_queue.put_nowait(job)
+                            except queue.Full:
+                                pass
+                else:
+                    if face_crop is not None and face_crop.size > 0 and embedding is not None:
+                        logger.debug(f"Unknown face detected for track {track_id}, adding to unknown_faces")
+                        unknown_faces.append(
+                            {
+                                "bbox": (left, top, right, bottom),
+                                "embedding": embedding,
+                                "face_image_bgr": face_crop,
+                                "blur": crop_blur,
+                            }
+                        )
+        except Empty:
+            pass
+
+        return unknown_faces
+
+    def _update_tracks(self, detections):
+        self.next_track_id = update_tracks(self.tracks, detections, self.next_track_id)
+
+    def _toggle_label_mode(self):
+        """Toggle Label Mode on/off."""
+        self.label_mode = not self.label_mode
+        if self.label_mode:
+            self.label_mode_button.config(text="Label Mode: On", relief=tk.SUNKEN)
+        else:
+            self.label_mode_button.config(text="Label Mode: Off", relief=tk.RAISED)
+            self.hovered_track_id = None
+
+    def _find_track_at_position(self, x, y):
+        """Find the track ID at the given (x, y) position, or None if no face is there.
+        
+        Coordinates are adjusted for potential offset when the label is larger than the image.
+        """
+        # Get the current image dimensions from the label
+        if not hasattr(self.video_label, 'imgtk') or self.video_label.imgtk is None:
+            return None
+        
+        img_width = self.video_label.imgtk.width()
+        img_height = self.video_label.imgtk.height()
+        label_width = self.video_label.winfo_width()
+        label_height = self.video_label.winfo_height()
+        
+        # Calculate offset (image is centered in label)
+        offset_x = max(0, (label_width - img_width) // 2)
+        offset_y = max(0, (label_height - img_height) // 2)
+        
+        # Adjust click coordinates to image space
+        img_x = x - offset_x
+        img_y = y - offset_y
+        
+        # Check if click is within image bounds
+        if img_x < 0 or img_x >= img_width or img_y < 0 or img_y >= img_height:
+            return None
+        
+        for track_id, track in self.tracks.items():
+            top, right, bottom, left = track["bbox"]
+            if left <= img_x <= right and top <= img_y <= bottom:
+                return track_id
+        return None
+
+    def _on_video_click(self, event):
+        """Handle click on the video label."""
+        if not self.label_mode:
+            return
+
+        track_id = self._find_track_at_position(event.x, event.y)
+        if track_id is None:
+            return
+
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+
+        # Get the current label/name for the dialog
+        current_label = track.get("label")
+        current_name = track.get("display_name") or ""
+
+        self._show_naming_dialog(track_id, current_label, current_name)
+
+    def _on_video_motion(self, event):
+        """Handle mouse motion over the video label for hover highlighting."""
+        if not self.label_mode:
+            self.hovered_track_id = None
+            return
+
+        self.hovered_track_id = self._find_track_at_position(event.x, event.y)
+
+    def _show_naming_dialog(self, track_id, identity_id, current_name):
+        """Show a dialog to name/rename a face."""
+        track = self.tracks.get(track_id)
+        if track is None:
+            return
+
+        prompt = f"Enter name for {identity_id or 'this person'}:"
+        new_name = simpledialog.askstring(
+            "Name Person",
+            prompt,
+            initialvalue=current_name,
+            parent=self.root
+        )
+
+        if new_name is None:
+            return  # User cancelled
+
+        # Update the display name in the track
+        stripped_name = new_name.strip() if new_name else None
+        track["display_name"] = stripped_name if stripped_name else None
+
+        # Persist the name if we have a valid identity_id
+        if identity_id and identity_id != "Unknown":
+            self._update_person_name(identity_id, new_name)
+
+    def _update_person_name(self, identity_id, new_name):
+        """Update the display name for a person in the store."""
+        ident_dir = resource_path(os.path.join(self.store.root_dir, identity_id))
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
+
+        if not os.path.exists(meta_path):
+            return
+
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+
+            stripped_name = new_name.strip() if new_name else None
+            meta["display_name"] = stripped_name if stripped_name else None
+
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+            # Update the in-memory index
+            self.index.update_meta(identity_id, meta)
+        except (IOError, json.JSONDecodeError):
+            # Failed to read or parse the metadata file; skip persistence
+            pass
 
     def change_camera(self):
         # Scan for available cameras
@@ -156,90 +357,82 @@ class FaceRecognitionApp:
             self.root.after(30, self.update_frame)
             return
 
-        self.frame_idx += 1
+        frame_index = self.frame_idx
+        unknown_faces = self._process_recognition_results(frame, frame_index)
 
-        # --- Main recognition logic (adapted from your original loop) ---
-        img_small = cv2.resize(frame, (0, 0), fx=SCALE, fy=SCALE)
-        img_small_rgb = cv2.cvtColor(img_small, cv2.COLOR_BGR2RGB)
+        if frame_index % DETECT_EVERY_K == 0:
+            small_frame = cv2.resize(frame, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+            small_frame_rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            face_locations_small = face_recognition.face_locations(
+                small_frame_rgb,
+                number_of_times_to_upsample=1,
+                model="hog"
+            )
+            detections = [
+                (
+                    int(top / DETECT_SCALE),
+                    int(right / DETECT_SCALE),
+                    int(bottom / DETECT_SCALE),
+                    int(left / DETECT_SCALE),
+                )
+                for (top, right, bottom, left) in face_locations_small
+            ]
+            self._update_tracks(detections)
+            recognition_tracks = []
+            for track_id, track in self.tracks.items():
+                last_recog = track.get("last_recog_time", 0.0)
+                now = time.time()
+                needs_recog = track.get("label") is None or (now - last_recog) > RECOG_COOLDOWN
+                if not needs_recog:
+                    continue
+                top, right, bottom, left = track["bbox"]
+                face_crop = frame[max(0, top):max(0, bottom), max(0, left):max(0, right)]
+                if face_crop.size == 0:
+                    continue
+                crop_blur = blur_score(face_crop)
+                track["pending"] = {
+                    "face_crop": face_crop,
+                    "blur": crop_blur,
+                    "bbox": track["bbox"],
+                }
+                track["state"] = "loading"
+                track["last_recog_time"] = now
+                recognition_tracks.append(
+                    {
+                        "track_id": track_id,
+                        "face_crop": face_crop,
+                    }
+                )
 
-        face_locations = face_recognition.face_locations(
-            img_small_rgb,
-            number_of_times_to_upsample=1,
-            model="hog"
-        )
-        face_encodings = face_recognition.face_encodings(img_small_rgb, face_locations)
+            if recognition_tracks:
+                ids, known_embs = self.index.get_snapshot()
+                submit_recognition(
+                    {
+                        "tracks": recognition_tracks,
+                        "ids": ids,
+                        "known_embs": known_embs,
+                    }
+                )
 
-        ids, known_embs = self.index.get_snapshot()
-        unknown_faces = []
+        for track_id, track in self.tracks.items():
+            top, right, bottom, left = track["bbox"]
+            base_label = track.get("label")
+            display_label = track.get("display_name") or base_label or "loading..."
+            color = (0, 255, 0) if base_label not in (None, "Unknown") else (0, 0, 255)
 
-        for (top, right, bottom, left), face_embedding in zip(face_locations, face_encodings):
-            emb = np.array(face_embedding, dtype="float32")
+            # Hover highlight in Label Mode - use thicker border and outer glow effect
+            is_hovered = self.label_mode and track_id == self.hovered_track_id
+            thickness = 2
+            if is_hovered:
+                # Draw outer highlight border first (yellow glow)
+                cv2.rectangle(frame, (left - 3, top - 3), (right + 3, bottom + 3), (0, 255, 255), 2)
+                thickness = 3
 
-            # upscale box
-            scale = 1 / SCALE
-            top = int(top * scale)
-            right = int(right * scale)
-            bottom = int(bottom * scale)
-            left = int(left * scale)
-
-            # crop
-            face_crop = frame[max(0, top):max(0, bottom), max(0, left):max(0, right)]
-            crop_blur = blur_score(face_crop) if face_crop.size > 0 else 0.0
-
-            label = "Unknown"
-            color = (0, 0, 255)
-
-            if known_embs.size > 0:
-                idx_match, dist = find_best_match(emb, known_embs)
-                if idx_match is not None and dist is not None and dist <= T_KNOWN:
-                    identity_id = ids[idx_match]
-                    label = identity_id
-                    color = (0, 255, 0)
-
-                    # upgrade path if this identity was low-quality
-                    meta = self.index.get_meta(identity_id)
-                    quality = meta.get("quality", {})
-                    if quality.get("needs_refresh", False):
-                        if crop_blur >= BLUR_THRESHOLD + BLUR_MARGIN_UPGRADE and face_crop.size > 0:
-                            sample = {
-                                "image": face_crop,
-                                "blur": crop_blur,
-                                "area": (right - left) * (bottom - top),
-                            }
-                            job = UpdateJob(identity_id=identity_id, embedding=emb, sample=sample)
-                            try:
-                                self.job_queue.put_nowait(job)
-                            except queue.Full:
-                                pass
-                else:
-                    # unknown
-                    if face_crop.size > 0:
-                        unknown_faces.append(
-                            {
-                                "bbox": (left, top, right, bottom),
-                                "embedding": emb,
-                                "face_image_bgr": face_crop,
-                                "blur": crop_blur,
-                            }
-                        )
-            else:
-                # no known embeddings yet
-                if face_crop.size > 0:
-                    unknown_faces.append(
-                        {
-                            "bbox": (left, top, right, bottom),
-                            "embedding": emb,
-                            "face_image_bgr": face_crop,
-                            "blur": crop_blur,
-                        }
-                    )
-
-            # draw
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
             cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
             cv2.putText(
                 frame,
-                label,
+                display_label,
                 (left + 6, bottom - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -247,20 +440,24 @@ class FaceRecognitionApp:
                 2,
             )
 
+        self.frame_idx += 1
+
         # handle unknowns
         if unknown_faces:
+            logger.debug(f"Processing {len(unknown_faces)} unknown face(s) at frame {self.frame_idx}")
             candidates = self.tracker.update(self.frame_idx, unknown_faces)
             for cand in candidates:
+                logger.info(f"Submitting registration job for candidate (track_id={cand.meta.get('track_id')})")
                 job = RegistrationJob(candidate=cand)
                 try:
                     self.job_queue.put_nowait(job)
                 except queue.Full:
-                    pass
+                    logger.warning("Registration job queue full, registration job dropped")
 
         # --- Convert frame to Tkinter-compatible image and show it ---
         # OpenCV is BGR; convert to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img_pil = Image.fromarray(frame_rgb)
+        frame_rgb_display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(frame_rgb_display)
         imgtk = ImageTk.PhotoImage(image=img_pil)
 
         # Keep a reference to avoid garbage collection
@@ -288,7 +485,7 @@ class FaceRecognitionApp:
 
 def main():
     root = tk.Tk()
-    app = FaceRecognitionApp(root, camera_index=1)
+    app = FaceRecognitionApp(root, camera_index=0)
     root.mainloop()
 
 
