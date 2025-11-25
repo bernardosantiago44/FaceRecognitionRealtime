@@ -161,14 +161,42 @@ class FaceRecognitionApp:
         if not self.label_mode:
             return
 
-        # Get click coordinates relative to the video label
+        # Get click coordinates relative to the video label widget
         click_x = event.x
         click_y = event.y
 
+        # Calculate offset if image is centered within the label
+        # The label might be larger than the image due to fill=BOTH, expand=True
+        label_width = self.video_label.winfo_width()
+        label_height = self.video_label.winfo_height()
+
+        # Get actual image dimensions from the stored frame
+        if self.current_frame is not None:
+            img_height, img_width = self.current_frame.shape[:2]
+        else:
+            # Fallback to camera settings
+            img_width = 640
+            img_height = 480
+
+        # Calculate offset (image is centered in label)
+        offset_x = max(0, (label_width - img_width) // 2)
+        offset_y = max(0, (label_height - img_height) // 2)
+
+        # Adjust click coordinates to image space
+        adjusted_x = click_x - offset_x
+        adjusted_y = click_y - offset_y
+
+        # Check if click is within image bounds
+        if adjusted_x < 0 or adjusted_x >= img_width or adjusted_y < 0 or adjusted_y >= img_height:
+            return
+
+        # Make a copy of face boxes to avoid race conditions during frame updates
+        face_boxes = list(self.current_face_boxes)
+
         # Check if click falls within any detected face bounding box
-        for face_info in self.current_face_boxes:
+        for face_info in face_boxes:
             left, top, right, bottom = face_info["bbox"]
-            if left <= click_x <= right and top <= click_y <= bottom:
+            if left <= adjusted_x <= right and top <= adjusted_y <= bottom:
                 # Face was clicked - trigger naming dialog
                 identity_id = face_info.get("identity_id")
                 face_crop = face_info.get("face_crop")
