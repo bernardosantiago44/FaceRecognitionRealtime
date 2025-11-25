@@ -295,5 +295,5 @@ class IdentityStore:
                 json.dump(meta, f, indent=2)
 
             return meta
-        except Exception:
+        except (IOError, OSError, json.JSONDecodeError):
             return None

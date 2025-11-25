@@ -173,8 +173,8 @@ class FaceNamingDialog(tk.Toplevel):
                 width=new_w,
                 height=new_h
             )
-        except Exception:
-            # Fallback to placeholder
+        except (cv2.error, ValueError, TypeError):
+            # Fallback to placeholder on image processing errors
             self.thumbnail_label.configure(
                 text="No thumbnail\navailable",
                 width=15,

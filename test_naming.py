@@ -6,15 +6,17 @@ import json
 import tempfile
 import shutil
 import unittest
+from unittest.mock import MagicMock
 import numpy as np
 
-# Manually handle imports to avoid tkinter dependency
+# Mock Tkinter and CV2 using unittest.mock before importing modules that depend on them
 import sys
-sys.modules['tkinter'] = type(sys)('tkinter')
-sys.modules['PIL'] = type(sys)('PIL')
-sys.modules['PIL.Image'] = type(sys)('PIL.Image')
-sys.modules['PIL.ImageTk'] = type(sys)('PIL.ImageTk')
-sys.modules['cv2'] = type(sys)('cv2')
+sys.modules['tkinter'] = MagicMock()
+sys.modules['tkinter.ttk'] = MagicMock()
+sys.modules['PIL'] = MagicMock()
+sys.modules['PIL.Image'] = MagicMock()
+sys.modules['PIL.ImageTk'] = MagicMock()
+sys.modules['cv2'] = MagicMock()
 
 from identity_store import IdentityStore
 from in_memory_index import InMemoryIndex
