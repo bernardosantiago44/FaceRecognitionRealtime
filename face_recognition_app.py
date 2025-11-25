@@ -176,12 +176,9 @@ class FaceRecognitionApp:
         Called when a face is clicked in Label Mode.
         Placeholder for naming dialog - to be implemented in issue #4.
         """
-        # For now, just show a simple message indicating the face was clicked
-        # The actual naming dialog will be implemented in issue #4
-        if identity_id:
-            print(f"Face clicked: {identity_id} at bbox {bbox}")
-        else:
-            print(f"Unknown face clicked at bbox {bbox}")
+        # Placeholder: the actual naming dialog will be implemented in issue #4
+        # For now, this method serves as an integration point for the naming workflow
+        pass
 
 
     def update_frame(self):
@@ -291,7 +288,7 @@ class FaceRecognitionApp:
 
             # Add visual cue when Label Mode is On (highlight border)
             if self.label_mode:
-                # Draw a cyan border to indicate clickable face
+                # Draw a yellow border to indicate clickable face
                 cv2.rectangle(frame, (left - 2, top - 2), (right + 2, bottom + 2), (255, 255, 0), 2)
 
             cv2.putText(
