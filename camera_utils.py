@@ -10,9 +10,6 @@ def list_available_cameras(max_index: int = 5):
     for idx in range(max_index + 1):
         cap = cv2.VideoCapture(idx)
         ok = cap.isOpened()
-        if not ok:
-            cap.release()
-            continue
         cap.release()
         if ok:
             available.append(idx)
