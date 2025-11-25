@@ -50,3 +50,11 @@ class InMemoryIndex:
     def update_meta(self, identity_id: str, meta: dict):
         with self._lock:
             self._meta[identity_id] = dict(meta)
+
+    def update_name(self, identity_id: str, name: str):
+        """Update the name field for an identity in memory."""
+        with self._lock:
+            if identity_id in self._meta:
+                self._meta[identity_id]["name"] = name
+            else:
+                self._meta[identity_id] = {"name": name}

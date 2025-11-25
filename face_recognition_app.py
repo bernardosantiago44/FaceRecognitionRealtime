@@ -20,6 +20,7 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 from CameraSelectionDialog import CameraSelectionDialog
+from FaceNamingDialog import FaceNamingDialog
 
 
 class FaceRecognitionApp:
@@ -30,8 +31,10 @@ class FaceRecognitionApp:
         # --- Label Mode state (session-only, not persisted) ---
         self.label_mode = False
         # Store current frame's face bounding boxes for click detection
-        # Each entry: {"bbox": (left, top, right, bottom), "identity_id": str or None}
+        # Each entry: {"bbox": (left, top, right, bottom), "identity_id": str or None, "face_crop": np.ndarray}
         self.current_face_boxes = []
+        # Store current frame for thumbnail retrieval
+        self.current_frame = None
 
         # --- Core components (unchanged logic) ---
         self.store = IdentityStore(root_dir="identities")
@@ -166,19 +169,58 @@ class FaceRecognitionApp:
         for face_info in self.current_face_boxes:
             left, top, right, bottom = face_info["bbox"]
             if left <= click_x <= right and top <= click_y <= bottom:
-                # Face was clicked - trigger naming dialog (to be done in issue #4)
+                # Face was clicked - trigger naming dialog
                 identity_id = face_info.get("identity_id")
-                self._on_face_clicked(identity_id, face_info["bbox"])
+                face_crop = face_info.get("face_crop")
+                self._on_face_clicked(identity_id, bbox=face_info["bbox"], face_crop=face_crop)
                 return
 
-    def _on_face_clicked(self, identity_id, bbox):
+    def _on_face_clicked(self, identity_id, bbox, face_crop=None):
         """
         Called when a face is clicked in Label Mode.
-        Placeholder for naming dialog - to be implemented in issue #4.
+        Opens the naming dialog for the selected face.
         """
-        # Placeholder: the actual naming dialog will be implemented in issue #4
-        # For now, this method serves as an integration point for the naming workflow
-        pass
+        # Check if the face is unknown/not registered
+        if identity_id is None:
+            messagebox.showinfo(
+                "Unknown Face",
+                "This face is not yet registered in the system.\n"
+                "Please wait for automatic registration to complete."
+            )
+            return
+
+        # Get current name from metadata
+        meta = self.index.get_meta(identity_id)
+        current_name = meta.get("name") if meta else None
+
+        # Open naming dialog
+        dialog = FaceNamingDialog(
+            self.root,
+            identity_id=identity_id,
+            face_thumbnail=face_crop,
+            current_name=current_name
+        )
+        # Wait for dialog to close
+        self.root.wait_window(dialog)
+
+        result = dialog.result
+        if result is None:
+            return  # User cancelled
+
+        if result["action"] == "save":
+            # Update name in registry and persist to disk
+            new_name = result["name"]
+            self._update_person_name(identity_id, new_name)
+        elif result["action"] == "clear":
+            # Clear name (revert to showing ID)
+            self._update_person_name(identity_id, None)
+
+    def _update_person_name(self, identity_id: str, name):
+        """Update a person's name in the registry and persist to disk."""
+        # Update in-memory index
+        self.index.update_name(identity_id, name)
+        # Persist to disk
+        self.store.update_name(identity_id, name)
 
 
     def update_frame(self):
@@ -194,6 +236,9 @@ class FaceRecognitionApp:
             return
 
         self.frame_idx += 1
+
+        # Store current frame for thumbnail retrieval
+        self.current_frame = frame.copy()
 
         # Clear face boxes for this frame (for Label Mode click detection)
         self.current_face_boxes = []
@@ -235,12 +280,14 @@ class FaceRecognitionApp:
                 if idx_match is not None and dist is not None and dist <= T_KNOWN:
                     identity_id = ids[idx_match]
                     current_identity_id = identity_id
-                    label = identity_id
+                    # Use name from metadata if available, otherwise use ID
+                    meta = self.index.get_meta(identity_id)
+                    person_name = meta.get("name") if meta else None
+                    label = person_name if person_name else identity_id
                     color = (0, 255, 0)
 
                     # upgrade path if this identity was low-quality
-                    meta = self.index.get_meta(identity_id)
-                    quality = meta.get("quality", {})
+                    quality = meta.get("quality", {}) if meta else {}
                     if quality.get("needs_refresh", False):
                         if crop_blur >= BLUR_THRESHOLD + BLUR_MARGIN_UPGRADE and face_crop.size > 0:
                             sample = {
@@ -276,10 +323,11 @@ class FaceRecognitionApp:
                         }
                     )
 
-            # Store face box for Label Mode click detection
+            # Store face box for Label Mode click detection (with face crop for thumbnail)
             self.current_face_boxes.append({
                 "bbox": (left, top, right, bottom),
-                "identity_id": current_identity_id
+                "identity_id": current_identity_id,
+                "face_crop": face_crop.copy() if face_crop.size > 0 else None
             })
 
             # draw
