@@ -27,6 +27,12 @@ class FaceRecognitionApp:
         self.root = root
         self.root.title("Face Recognition")
 
+        # --- Label Mode state (session-only, not persisted) ---
+        self.label_mode = False
+        # Store current frame's face bounding boxes for click detection
+        # Each entry: {"bbox": (left, top, right, bottom), "identity_id": str or None}
+        self.current_face_boxes = []
+
         # --- Core components (unchanged logic) ---
         self.store = IdentityStore(root_dir="identities")
         self.index = InMemoryIndex(self.store)
@@ -65,15 +71,27 @@ class FaceRecognitionApp:
         self.video_label = tk.Label(self.root)
         self.video_label.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        # Bind click handler for Label Mode
+        self.video_label.bind("<Button-1>", self._on_video_click)
+
         self.bottom_frame = tk.Frame(self.root)
         self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Label Mode toggle button
+        self.label_mode_button = tk.Button(
+            self.bottom_frame,
+            text="Label Mode: Off",
+            command=self._toggle_label_mode,
+            width=15
+        )
+        self.label_mode_button.pack(side=tk.LEFT, padx=5, pady=5)
 
         self.select_cam_button = tk.Button(
             self.bottom_frame,
             text="Select Camera",
             command=self.change_camera
         )
-        self.select_cam_button.pack(side=tk.BOTTOM, pady=5)
+        self.select_cam_button.pack(side=tk.LEFT, padx=5, pady=5)
 
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -119,6 +137,49 @@ class FaceRecognitionApp:
         self.camera_index = selected_idx
         self._open_camera(self.camera_index)
 
+    def _toggle_label_mode(self):
+        """Toggle Label Mode on/off."""
+        self.label_mode = not self.label_mode
+        if self.label_mode:
+            self.label_mode_button.config(
+                text="Label Mode: On",
+                relief=tk.SUNKEN,
+                bg="#90EE90"  # Light green background when active
+            )
+        else:
+            self.label_mode_button.config(
+                text="Label Mode: Off",
+                relief=tk.RAISED,
+                bg=self.root.cget("bg")  # Default background
+            )
+
+    def _on_video_click(self, event):
+        """Handle click on video feed. In Label Mode, check if a face was clicked."""
+        if not self.label_mode:
+            return
+
+        # Get click coordinates relative to the video label
+        click_x = event.x
+        click_y = event.y
+
+        # Check if click falls within any detected face bounding box
+        for face_info in self.current_face_boxes:
+            left, top, right, bottom = face_info["bbox"]
+            if left <= click_x <= right and top <= click_y <= bottom:
+                # Face was clicked - trigger naming dialog (to be done in issue #4)
+                identity_id = face_info.get("identity_id")
+                self._on_face_clicked(identity_id, face_info["bbox"])
+                return
+
+    def _on_face_clicked(self, identity_id, bbox):
+        """
+        Called when a face is clicked in Label Mode.
+        Placeholder for naming dialog - to be implemented in issue #4.
+        """
+        # Placeholder: the actual naming dialog will be implemented in issue #4
+        # For now, this method serves as an integration point for the naming workflow
+        pass
+
 
     def update_frame(self):
         if self.cap is None or not self.cap.isOpened():
@@ -133,6 +194,9 @@ class FaceRecognitionApp:
             return
 
         self.frame_idx += 1
+
+        # Clear face boxes for this frame (for Label Mode click detection)
+        self.current_face_boxes = []
 
         # --- Main recognition logic (adapted from your original loop) ---
         img_small = cv2.resize(frame, (0, 0), fx=SCALE, fy=SCALE)
@@ -164,11 +228,13 @@ class FaceRecognitionApp:
 
             label = "Unknown"
             color = (0, 0, 255)
+            current_identity_id = None  # Track identity for Label Mode
 
             if known_embs.size > 0:
                 idx_match, dist = find_best_match(emb, known_embs)
                 if idx_match is not None and dist is not None and dist <= T_KNOWN:
                     identity_id = ids[idx_match]
+                    current_identity_id = identity_id
                     label = identity_id
                     color = (0, 255, 0)
 
@@ -210,9 +276,21 @@ class FaceRecognitionApp:
                         }
                     )
 
+            # Store face box for Label Mode click detection
+            self.current_face_boxes.append({
+                "bbox": (left, top, right, bottom),
+                "identity_id": current_identity_id
+            })
+
             # draw
             cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
             cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
+
+            # Add visual cue when Label Mode is On (highlight border)
+            if self.label_mode:
+                # Draw a yellow border to indicate clickable face
+                cv2.rectangle(frame, (left - 2, top - 2), (right + 2, bottom + 2), (255, 255, 0), 2)
+
             cv2.putText(
                 frame,
                 label,
