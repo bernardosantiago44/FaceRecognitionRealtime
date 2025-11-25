@@ -262,3 +262,38 @@ class IdentityStore:
             return meta
         except Exception:
             return None
+
+    def update_name(self, identity_id: str, name: Optional[str]) -> Optional[dict]:
+        """
+        Update the name field for an identity and persist to disk.
+
+        Args:
+            identity_id: The identity to update
+            name: The new name (or None to clear)
+
+        Returns:
+            Updated meta dict or None on failure
+        """
+        ident_dir = resource_path(os.path.join(self.root_dir, identity_id))
+        meta_path = resource_path(os.path.join(ident_dir, "meta.json"))
+
+        if not os.path.exists(ident_dir):
+            return None
+
+        try:
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+            else:
+                meta = {"id": identity_id}
+
+            # Update name field
+            meta["name"] = name
+            meta["last_updated_at"] = self._now_iso()
+
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+            return meta
+        except (IOError, OSError, json.JSONDecodeError):
+            return None
